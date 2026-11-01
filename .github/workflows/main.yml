@@ -1,23 +1,25 @@
-name: Blox Fruits Project
+name: Telegram Bot Test
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
-  start:
+  run-bot:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download project
+      - name: Get project
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Run Python
-        run: python main.py
+      - name: Install libraries
+        run: pip install -r requirements.txt
+
+      - name: Start bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: python bot.py
