@@ -1,12 +1,13 @@
 import os
 import time
 import logging
+import sqlite3
 import telebot
 from telebot import types
 from flask import Flask, request, abort, jsonify
 
 # =====================================
-# ЛОГИ И НАСТРОЙКИ
+# ЛОГИ
 # =====================================
 
 logging.basicConfig(
@@ -14,13 +15,26 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
+# =====================================
+# НАСТРОЙКИ
+# =====================================
+
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL")
 
-if not all([TOKEN, ADMIN_ID, WEBHOOK_SECRET, BASE_URL]):
-    raise RuntimeError("Не заданы необходимые переменные окружения")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан")
+
+if not ADMIN_ID:
+    raise RuntimeError("ADMIN_ID не задан")
+
+if not WEBHOOK_SECRET:
+    raise RuntimeError("WEBHOOK_SECRET не задан")
+
+if not BASE_URL:
+    raise RuntimeError("RENDER_EXTERNAL_URL не задан")
 
 ADMIN_ID = int(ADMIN_ID)
 
@@ -36,6 +50,58 @@ FARM_STARTED_AT = None
 
 FARM_MODES = ["Обычный", "Быстрый", "Безопасный"]
 
+WAITING_PROGRESS = set()
+
+# =====================================
+# БАЗА ДАННЫХ
+# =====================================
+
+db = sqlite3.connect("users.db", check_same_thread=False)
+cursor = db.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS progress (
+    user_id INTEGER PRIMARY KEY,
+    level INTEGER NOT NULL DEFAULT 1,
+    beli INTEGER NOT NULL DEFAULT 0
+)
+""")
+
+db.commit()
+
+
+def get_progress(user_id):
+    cursor.execute(
+        "SELECT level, beli FROM progress WHERE user_id = ?",
+        (user_id,)
+    )
+
+    result = cursor.fetchone()
+
+    if result:
+        return result[0], result[1]
+
+    cursor.execute(
+        "INSERT OR IGNORE INTO progress (user_id, level, beli) VALUES (?, 1, 0)",
+        (user_id,)
+    )
+    db.commit()
+
+    return 1, 0
+
+
+def save_progress(user_id, level, beli):
+    cursor.execute("""
+        INSERT INTO progress (user_id, level, beli)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET
+            level = excluded.level,
+            beli = excluded.beli
+    """, (user_id, level, beli))
+
+    db.commit()
+
 
 # =====================================
 # ДОСТУП
@@ -50,20 +116,27 @@ def is_admin(message):
 
 def check_access(message):
     if not is_admin(message):
+        logging.warning(
+            "ACCESS DENIED: user_id=%s",
+            message.from_user.id if message.from_user else None
+        )
+
         bot.reply_to(message, "⛔ Доступ запрещён.")
         return False
+
     return True
 
 
 # =====================================
-# КЛАВИАТУРЫ
+# МЕНЮ
 # =====================================
 
 def main_menu():
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
 
     keyboard.row("🎮 Фарм", "📊 Статус")
-    keyboard.row("📈 Статистика", "🔄 Проверка")
+    keyboard.row("📈 Статистика", "💰 Мой прогресс")
+    keyboard.row("✏️ Обновить прогресс", "🔄 Проверка")
     keyboard.row("ℹ️ Помощь")
 
     return keyboard
@@ -95,8 +168,6 @@ def mode_menu():
 # =====================================
 
 def farm_status_text():
-    global FARM_RUNNING, FARM_STARTED_AT
-
     if FARM_RUNNING:
         elapsed = int(time.time() - FARM_STARTED_AT)
         state = "🟢 Включён"
@@ -110,7 +181,7 @@ def farm_status_text():
         f"Состояние: {state}\n"
         f"Режим: {FARM_MODE}\n"
         f"Время работы: {duration}\n\n"
-        "ℹ️ Это панель состояния, игровой клиент не подключён."
+        "ℹ️ Игровой клиент не подключён."
     )
 
 
@@ -181,7 +252,7 @@ def help_command(message):
 
 
 # =====================================
-# ОБРАБОТКА КНОПОК
+# ФАРМ
 # =====================================
 
 @bot.message_handler(func=lambda m: m.text == "🎮 Фарм")
@@ -215,7 +286,7 @@ def start_farm(message):
         message.chat.id,
         "🟢 Режим включён.\n"
         f"Выбранный режим: {FARM_MODE}\n\n"
-        "Это только переключатель состояния панели.",
+        "Это переключатель состояния панели, а не автоматическое управление персонажем.",
         reply_markup=farm_menu()
     )
 
@@ -285,6 +356,101 @@ def show_farm_status(message):
     )
 
 
+# =====================================
+# ПРОГРЕСС ИГРОКА
+# =====================================
+
+@bot.message_handler(func=lambda m: m.text == "💰 Мой прогресс")
+def show_progress(message):
+    if not check_access(message):
+        return
+
+    level, beli = get_progress(message.from_user.id)
+
+    bot.send_message(
+        message.chat.id,
+        "💰 ТВОЙ ПРОГРЕСС Blox Fruits\n\n"
+        f"⭐ Уровень: {level}\n"
+        f"💵 Beli: {beli:,}\n\n"
+        "Данные обновляются вручную."
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "✏️ Обновить прогресс")
+def ask_progress(message):
+    if not check_access(message):
+        return
+
+    WAITING_PROGRESS.add(message.from_user.id)
+
+    bot.send_message(
+        message.chat.id,
+        "✏️ Отправь данные в формате:\n\n"
+        "УРОВЕНЬ BELI\n\n"
+        "Например:\n"
+        "150 250000"
+    )
+
+
+@bot.message_handler(
+    func=lambda m: m.from_user
+    and m.from_user.id in WAITING_PROGRESS
+)
+def save_player_progress(message):
+    if not check_access(message):
+        return
+
+    try:
+        parts = message.text.strip().split()
+
+        if len(parts) != 2:
+            raise ValueError
+
+        level = int(parts[0])
+        beli = int(parts[1])
+
+        if level < 1 or level > 2800 or beli < 0:
+            raise ValueError
+
+        save_progress(
+            message.from_user.id,
+            level,
+            beli
+        )
+
+        WAITING_PROGRESS.discard(message.from_user.id)
+
+        bot.send_message(
+            message.chat.id,
+            "✅ ПРОГРЕСС ОБНОВЛЁН!\n\n"
+            f"⭐ Уровень: {level}\n"
+            f"💵 Beli: {beli:,}",
+            reply_markup=main_menu()
+        )
+
+    except (ValueError, AttributeError):
+        bot.send_message(
+            message.chat.id,
+            "❌ Неверный формат.\n"
+            "Пример: 150 250000"
+        )
+
+
+# =====================================
+# ПРОВЕРКА И ГЛАВНОЕ МЕНЮ
+# =====================================
+
+@bot.message_handler(func=lambda m: m.text == "🔄 Проверка")
+def check_button(message):
+    if not check_access(message):
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "✅ Проверка пройдена!"
+    )
+
+
 @bot.message_handler(func=lambda m: m.text == "⬅️ Главное меню")
 def back_main(message):
     if not check_access(message):
@@ -309,11 +475,14 @@ def back_farm(message):
     )
 
 
+# =====================================
+# КНОПКИ ГЛАВНОГО МЕНЮ
+# =====================================
+
 @bot.message_handler(
     func=lambda m: m.text in [
         "📊 Статус",
         "📈 Статистика",
-        "🔄 Проверка",
         "ℹ️ Помощь"
     ]
 )
@@ -323,10 +492,10 @@ def main_buttons(message):
 
     if message.text == "📊 Статус":
         status(message)
+
     elif message.text == "📈 Статистика":
         stats(message)
-    elif message.text == "🔄 Проверка":
-        bot.send_message(message.chat.id, "✅ Проверка пройдена!")
+
     elif message.text == "ℹ️ Помощь":
         help_command(message)
 
@@ -369,7 +538,9 @@ def test():
 
     except Exception:
         logging.exception("TEST ERROR")
-        return jsonify({"error": "Не удалось проверить webhook"}), 500
+        return jsonify({
+            "error": "Не удалось проверить webhook"
+        }), 500
 
 
 # =====================================
@@ -383,16 +554,19 @@ def webhook():
     )
 
     if received_secret != WEBHOOK_SECRET:
+        logging.warning("WEBHOOK: неправильный секрет")
         abort(403)
 
     data = request.get_json(silent=True)
 
     if not data:
+        logging.warning("WEBHOOK: пустое обновление")
         return "Empty update", 400
 
     try:
         update = telebot.types.Update.de_json(data)
         bot.process_new_updates([update])
+
         return "OK", 200
 
     except Exception:
