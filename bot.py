@@ -37,7 +37,7 @@ if not BASE_URL:
 
 ADMIN_ID = int(ADMIN_ID)
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=False)
 app = Flask(__name__)
 
 START_TIME = time.time()
