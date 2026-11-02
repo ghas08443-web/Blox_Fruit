@@ -1,5 +1,5 @@
-
 import os
+import time
 import telebot
 from telebot import types
 
@@ -11,18 +11,21 @@ TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if not TOKEN:
-    raise RuntimeError("BOT_TOKEN не найден в GitHub Secrets")
+    raise RuntimeError("BOT_TOKEN не найден")
 
 if not ADMIN_ID:
-    raise RuntimeError("ADMIN_ID не найден в GitHub Secrets")
+    raise RuntimeError("ADMIN_ID не найден")
 
 ADMIN_ID = int(ADMIN_ID)
 
 bot = telebot.TeleBot(TOKEN)
 
+START_TIME = time.time()
+MESSAGE_COUNT = 0
+
 
 # =========================
-# ПРОВЕРКА ДОСТУПА
+# ДОСТУП
 # =========================
 
 def is_admin(message):
@@ -32,15 +35,15 @@ def is_admin(message):
     )
 
 
-def deny_access(message):
-    bot.reply_to(
-        message,
-        "⛔ У тебя нет доступа к панели."
-    )
+def check_access(message):
+    if not is_admin(message):
+        bot.reply_to(message, "⛔ Доступ запрещён.")
+        return False
+    return True
 
 
 # =========================
-# ГЛАВНОЕ МЕНЮ
+# МЕНЮ
 # =========================
 
 def main_menu():
@@ -48,34 +51,27 @@ def main_menu():
         resize_keyboard=True
     )
 
-    keyboard.row(
-        "📊 Статус",
-        "ℹ️ Помощь"
-    )
-
-    keyboard.row(
-        "🔄 Проверка бота"
-    )
+    keyboard.row("📊 Статус", "📈 Статистика")
+    keyboard.row("🔄 Проверка", "ℹ️ Помощь")
 
     return keyboard
 
 
 # =========================
-# КОМАНДА START
+# START
 # =========================
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    if not is_admin(message):
-        deny_access(message)
+    if not check_access(message):
         return
 
     bot.send_message(
         message.chat.id,
         "🍎 Blox Fruits Control\n\n"
         "🔐 Доступ подтверждён!\n"
-        "Панель управления запущена.\n\n"
-        "Выбери нужную кнопку:",
+        "🟢 Telegram-панель активна.\n\n"
+        "Выбери действие:",
         reply_markup=main_menu()
     )
 
@@ -86,22 +82,41 @@ def start(message):
 
 @bot.message_handler(commands=["status"])
 def status(message):
-    if not is_admin(message):
-        deny_access(message)
+    if not check_access(message):
+        return
+
+    uptime = int(time.time() - START_TIME)
+    hours = uptime // 3600
+    minutes = (uptime % 3600) // 60
+    seconds = uptime % 60
+
+    bot.send_message(
+        message.chat.id,
+        "📊 СОСТОЯНИЕ СИСТЕМЫ\n\n"
+        "🟢 Telegram-бот: работает\n"
+        "⏱ Время работы: "
+        f"{hours} ч. {minutes} мин. {seconds} сек.\n"
+        "📡 Соединение с Telegram: активно\n"
+        "🎮 Игровой клиент: не подключён"
+    )
+
+
+# =========================
+# СТАТИСТИКА
+# =========================
+
+@bot.message_handler(commands=["stats"])
+def stats(message):
+    if not check_access(message):
         return
 
     bot.send_message(
         message.chat.id,
-        "🟢 Telegram-бот работает.\n"
-        "📡 Соединение активно."
+        "📈 СТАТИСТИКА\n\n"
+        f"📨 Получено сообщений: {MESSAGE_COUNT}\n"
+        f"⏱ Время работы: {int(time.time() - START_TIME)} секунд\n"
+        "🟢 Состояние: активно"
     )
-
-
-@bot.message_handler(
-    func=lambda m: m.text == "📊 Статус"
-)
-def status_button(message):
-    status(message)
 
 
 # =========================
@@ -110,43 +125,54 @@ def status_button(message):
 
 @bot.message_handler(commands=["help"])
 def help_command(message):
-    if not is_admin(message):
-        deny_access(message)
+    if not check_access(message):
         return
 
     bot.send_message(
         message.chat.id,
-        "📋 Список команд:\n\n"
+        "ℹ️ КОМАНДЫ\n\n"
         "/start — открыть меню\n"
-        "/status — проверить состояние\n"
+        "/status — состояние системы\n"
+        "/stats — статистика\n"
         "/help — помощь"
     )
 
 
-@bot.message_handler(
-    func=lambda m: m.text == "ℹ️ Помощь"
-)
-def help_button(message):
-    help_command(message)
-
-
 # =========================
-# ПРОВЕРКА БОТА
+# КНОПКИ
 # =========================
 
 @bot.message_handler(
-    func=lambda m: m.text == "🔄 Проверка бота"
+    func=lambda m: m.text in [
+        "📊 Статус",
+        "📈 Статистика",
+        "🔄 Проверка",
+        "ℹ️ Помощь"
+    ]
 )
-def check_button(message):
-    if not is_admin(message):
-        deny_access(message)
+def buttons(message):
+    global MESSAGE_COUNT
+
+    if not check_access(message):
         return
 
-    bot.send_message(
-        message.chat.id,
-        "✅ Проверка пройдена!\n"
-        "Бот принимает сообщения."
-    )
+    MESSAGE_COUNT += 1
+
+    if message.text == "📊 Статус":
+        status(message)
+
+    elif message.text == "📈 Статистика":
+        stats(message)
+
+    elif message.text == "🔄 Проверка":
+        bot.send_message(
+            message.chat.id,
+            "✅ Проверка пройдена!\n"
+            "Telegram-бот отвечает."
+        )
+
+    elif message.text == "ℹ️ Помощь":
+        help_command(message)
 
 
 # =========================
@@ -155,4 +181,8 @@ def check_button(message):
 
 print("Blox Fruits Control started!")
 
-bot.infinity_polling()
+bot.infinity_polling(
+    skip_pending=True,
+    timeout=30,
+    long_polling_timeout=30
+)
