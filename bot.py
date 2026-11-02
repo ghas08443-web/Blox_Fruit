@@ -1,12 +1,15 @@
 import os
 import time
+import logging
 import telebot
 from telebot import types
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify
 
 # =========================
 # НАСТРОЙКИ
 # =========================
+
+logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -14,7 +17,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 if not all([TOKEN, ADMIN_ID, WEBHOOK_SECRET, BASE_URL]):
-    raise RuntimeError("Не заданы все переменные окружения")
+    raise RuntimeError("Не заданы переменные окружения!")
 
 ADMIN_ID = int(ADMIN_ID)
 
@@ -23,7 +26,6 @@ app = Flask(__name__)
 
 START_TIME = time.time()
 MESSAGE_COUNT = 0
-
 
 # =========================
 # ДОСТУП
@@ -62,6 +64,9 @@ def main_menu():
 
 @bot.message_handler(commands=["start"])
 def start(message):
+    logging.info("Получена команда /start от %s",
+                 message.from_user.id)
+
     if not check_access(message):
         return
 
@@ -99,7 +104,7 @@ def stats(message):
     bot.send_message(
         message.chat.id,
         "📈 СТАТИСТИКА\n\n"
-        f"📨 Сообщений: {MESSAGE_COUNT}\n"
+        f"📨 Нажатий на кнопки: {MESSAGE_COUNT}\n"
         f"⏱ Время работы: "
         f"{int(time.time() - START_TIME)} сек."
     )
@@ -141,22 +146,19 @@ def buttons(message):
 
     if message.text == "📊 Статус":
         status(message)
-
     elif message.text == "📈 Статистика":
         stats(message)
-
     elif message.text == "🔄 Проверка":
         bot.send_message(
             message.chat.id,
             "✅ Проверка пройдена!"
         )
-
     elif message.text == "ℹ️ Помощь":
         help_command(message)
 
 
 # =========================
-# WEBHOOK
+# WEBHOOK И ДИАГНОСТИКА
 # =========================
 
 @app.route("/", methods=["GET"])
@@ -164,31 +166,67 @@ def home():
     return "Blox Fruits Control is running!", 200
 
 
+@app.route("/test", methods=["GET"])
+def test():
+    try:
+        info = bot.get_webhook_info()
+
+        return jsonify({
+            "server": "running",
+            "webhook_url": info.url,
+            "pending_updates": info.pending_update_count,
+            "last_error": info.last_error_message
+        })
+    except Exception as e:
+        logging.exception("Ошибка проверки webhook")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    if request.headers.get(
+    received_secret = request.headers.get(
         "X-Telegram-Bot-Api-Secret-Token"
-    ) != WEBHOOK_SECRET:
+    )
+
+    if received_secret != WEBHOOK_SECRET:
+        logging.warning("Неверный секрет webhook")
         abort(403)
 
     data = request.get_json(silent=True)
 
-    if data:
+    if not data:
+        logging.warning("Получен пустой запрос")
+        return "Empty update", 400
+
+    try:
         update = telebot.types.Update.de_json(data)
+
+        logging.info("Получено обновление Telegram")
+
         bot.process_new_updates([update])
 
-    return "OK", 200
+        return "OK", 200
+
+    except Exception:
+        logging.exception("Ошибка обработки обновления")
+        return "Internal error", 500
 
 
 # =========================
-# РЕГИСТРАЦИЯ WEBHOOK
+# ЗАПУСК WEBHOOK
 # =========================
 
 webhook_url = BASE_URL.rstrip("/") + "/webhook"
 
-bot.set_webhook(
-    url=webhook_url,
-    secret_token=WEBHOOK_SECRET
-)
+try:
+    result = bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET
+    )
 
-print("Blox Fruits Control webhook started!")
+    logging.info("Webhook registration result: %s", result)
+    logging.info("Webhook URL: %s", webhook_url)
+
+except Exception:
+    logging.exception("Не удалось зарегистрировать webhook")
+    raise
