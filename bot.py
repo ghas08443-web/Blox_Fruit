@@ -6,7 +6,7 @@ from telebot import types
 from flask import Flask, request, abort, jsonify
 
 # =====================================
-# ЛОГИ
+# ЛОГИ И НАСТРОЙКИ
 # =====================================
 
 logging.basicConfig(
@@ -14,26 +14,13 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-# =====================================
-# НАСТРОЙКИ
-# =====================================
-
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL")
 
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN не задан")
-
-if not ADMIN_ID:
-    raise RuntimeError("ADMIN_ID не задан")
-
-if not WEBHOOK_SECRET:
-    raise RuntimeError("WEBHOOK_SECRET не задан")
-
-if not BASE_URL:
-    raise RuntimeError("RENDER_EXTERNAL_URL не задан")
+if not all([TOKEN, ADMIN_ID, WEBHOOK_SECRET, BASE_URL]):
+    raise RuntimeError("Не заданы необходимые переменные окружения")
 
 ADMIN_ID = int(ADMIN_ID)
 
@@ -42,6 +29,12 @@ app = Flask(__name__)
 
 START_TIME = time.time()
 MESSAGE_COUNT = 0
+
+FARM_RUNNING = False
+FARM_MODE = "Обычный"
+FARM_STARTED_AT = None
+
+FARM_MODES = ["Обычный", "Быстрый", "Безопасный"]
 
 
 # =====================================
@@ -57,31 +50,68 @@ def is_admin(message):
 
 def check_access(message):
     if not is_admin(message):
-        logging.warning(
-            "ACCESS DENIED: user_id=%s, admin_id=%s",
-            message.from_user.id if message.from_user else None,
-            ADMIN_ID
-        )
-
         bot.reply_to(message, "⛔ Доступ запрещён.")
         return False
-
     return True
 
 
 # =====================================
-# МЕНЮ
+# КЛАВИАТУРЫ
 # =====================================
 
 def main_menu():
-    keyboard = types.ReplyKeyboardMarkup(
-        resize_keyboard=True
-    )
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
 
-    keyboard.row("📊 Статус", "📈 Статистика")
-    keyboard.row("🔄 Проверка", "ℹ️ Помощь")
+    keyboard.row("🎮 Фарм", "📊 Статус")
+    keyboard.row("📈 Статистика", "🔄 Проверка")
+    keyboard.row("ℹ️ Помощь")
 
     return keyboard
+
+
+def farm_menu():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+
+    keyboard.row("▶️ Запустить", "⏹ Остановить")
+    keyboard.row("🎯 Выбрать режим", "📊 Статус фарма")
+    keyboard.row("⬅️ Главное меню")
+
+    return keyboard
+
+
+def mode_menu():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+
+    for mode in FARM_MODES:
+        keyboard.row(mode)
+
+    keyboard.row("⬅️ Назад")
+
+    return keyboard
+
+
+# =====================================
+# СОСТОЯНИЕ ФАРМА
+# =====================================
+
+def farm_status_text():
+    global FARM_RUNNING, FARM_STARTED_AT
+
+    if FARM_RUNNING:
+        elapsed = int(time.time() - FARM_STARTED_AT)
+        state = "🟢 Включён"
+        duration = f"{elapsed // 60} мин. {elapsed % 60} сек."
+    else:
+        state = "🔴 Остановлен"
+        duration = "—"
+
+    return (
+        "🎮 СОСТОЯНИЕ ФАРМА\n\n"
+        f"Состояние: {state}\n"
+        f"Режим: {FARM_MODE}\n"
+        f"Время работы: {duration}\n\n"
+        "ℹ️ Это панель состояния, игровой клиент не подключён."
+    )
 
 
 # =====================================
@@ -92,29 +122,18 @@ def main_menu():
 def start(message):
     global MESSAGE_COUNT
 
-    logging.info(
-        "START HANDLER: user_id=%s, text=%r",
-        message.from_user.id,
-        message.text
+    if not check_access(message):
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "🍎 Blox Fruits Control\n\n"
+        "🔐 Доступ подтверждён!\n"
+        "🟢 Панель активна.",
+        reply_markup=main_menu()
     )
 
-    try:
-        if not check_access(message):
-            return
-
-        bot.send_message(
-            message.chat.id,
-            "🍎 Blox Fruits Control\n\n"
-            "🔐 Доступ подтверждён!\n"
-            "🟢 Панель активна.",
-            reply_markup=main_menu()
-        )
-
-        MESSAGE_COUNT += 1
-        logging.info("START RESPONSE SENT")
-
-    except Exception:
-        logging.exception("START HANDLER ERROR")
+    MESSAGE_COUNT += 1
 
 
 @bot.message_handler(commands=["status"])
@@ -129,7 +148,7 @@ def status(message):
         "📊 СОСТОЯНИЕ СИСТЕМЫ\n\n"
         "🟢 Telegram-бот: работает\n"
         f"⏱ Время работы: {uptime // 60} мин.\n"
-        "📡 Соединение: активно\n"
+        "📡 Webhook: активен\n"
         "🎮 Игровой клиент: не подключён"
     )
 
@@ -142,9 +161,8 @@ def stats(message):
     bot.send_message(
         message.chat.id,
         "📈 СТАТИСТИКА\n\n"
-        f"📨 Обработано сообщений: {MESSAGE_COUNT}\n"
-        f"⏱ Время работы: "
-        f"{int(time.time() - START_TIME)} сек."
+        f"📨 Сообщений: {MESSAGE_COUNT}\n"
+        f"⏱ Работа бота: {int(time.time() - START_TIME)} сек."
     )
 
 
@@ -156,76 +174,175 @@ def help_command(message):
     bot.send_message(
         message.chat.id,
         "/start — меню\n"
-        "/status — состояние\n"
+        "/status — состояние системы\n"
         "/stats — статистика\n"
         "/help — помощь"
     )
 
 
 # =====================================
-# КНОПКИ
+# ОБРАБОТКА КНОПОК
 # =====================================
 
+@bot.message_handler(func=lambda m: m.text == "🎮 Фарм")
+def open_farm(message):
+    if not check_access(message):
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "🎮 Панель режима фарма",
+        reply_markup=farm_menu()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "▶️ Запустить")
+def start_farm(message):
+    global FARM_RUNNING, FARM_STARTED_AT, MESSAGE_COUNT
+
+    if not check_access(message):
+        return
+
+    if FARM_RUNNING:
+        bot.send_message(message.chat.id, "⚠️ Режим уже включён.")
+        return
+
+    FARM_RUNNING = True
+    FARM_STARTED_AT = time.time()
+    MESSAGE_COUNT += 1
+
+    bot.send_message(
+        message.chat.id,
+        "🟢 Режим включён.\n"
+        f"Выбранный режим: {FARM_MODE}\n\n"
+        "Это только переключатель состояния панели.",
+        reply_markup=farm_menu()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "⏹ Остановить")
+def stop_farm(message):
+    global FARM_RUNNING, FARM_STARTED_AT, MESSAGE_COUNT
+
+    if not check_access(message):
+        return
+
+    FARM_RUNNING = False
+    FARM_STARTED_AT = None
+    MESSAGE_COUNT += 1
+
+    bot.send_message(
+        message.chat.id,
+        "🔴 Режим остановлен.",
+        reply_markup=farm_menu()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "🎯 Выбрать режим")
+def choose_mode(message):
+    if not check_access(message):
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "Выбери режим:",
+        reply_markup=mode_menu()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text in FARM_MODES)
+def set_mode(message):
+    global FARM_MODE
+
+    if not check_access(message):
+        return
+
+    if FARM_RUNNING:
+        bot.send_message(
+            message.chat.id,
+            "Сначала останови текущий режим."
+        )
+        return
+
+    FARM_MODE = message.text
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ Выбран режим: {FARM_MODE}",
+        reply_markup=farm_menu()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "📊 Статус фарма")
+def show_farm_status(message):
+    if not check_access(message):
+        return
+
+    bot.send_message(
+        message.chat.id,
+        farm_status_text(),
+        reply_markup=farm_menu()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "⬅️ Главное меню")
+def back_main(message):
+    if not check_access(message):
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "Главное меню:",
+        reply_markup=main_menu()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "⬅️ Назад")
+def back_farm(message):
+    if not check_access(message):
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "Панель фарма:",
+        reply_markup=farm_menu()
+    )
+
+
 @bot.message_handler(
-    func=lambda message: message.text in [
+    func=lambda m: m.text in [
         "📊 Статус",
         "📈 Статистика",
         "🔄 Проверка",
         "ℹ️ Помощь"
     ]
 )
-def buttons(message):
-    global MESSAGE_COUNT
-
-    logging.info(
-        "BUTTON HANDLER: user_id=%s text=%r",
-        message.from_user.id,
-        message.text
-    )
-
+def main_buttons(message):
     if not check_access(message):
         return
 
-    try:
-        if message.text == "📊 Статус":
-            status(message)
-
-        elif message.text == "📈 Статистика":
-            stats(message)
-
-        elif message.text == "🔄 Проверка":
-            bot.send_message(
-                message.chat.id,
-                "✅ Проверка пройдена!"
-            )
-
-        elif message.text == "ℹ️ Помощь":
-            help_command(message)
-
-        MESSAGE_COUNT += 1
-
-    except Exception:
-        logging.exception("BUTTON HANDLER ERROR")
+    if message.text == "📊 Статус":
+        status(message)
+    elif message.text == "📈 Статистика":
+        stats(message)
+    elif message.text == "🔄 Проверка":
+        bot.send_message(message.chat.id, "✅ Проверка пройдена!")
+    elif message.text == "ℹ️ Помощь":
+        help_command(message)
 
 
 # =====================================
 # НЕИЗВЕСТНЫЕ СООБЩЕНИЯ
 # =====================================
 
-@bot.message_handler(func=lambda message: True)
+@bot.message_handler(func=lambda m: True)
 def unknown_message(message):
-    logging.info(
-        "UNKNOWN MESSAGE: user_id=%s text=%r",
-        message.from_user.id if message.from_user else None,
-        message.text
-    )
-
     if not check_access(message):
         return
 
     bot.send_message(
         message.chat.id,
-        "Не понял команду. Используй меню или /help."
+        "Не понял команду. Используй /help."
     )
 
 
@@ -252,9 +369,7 @@ def test():
 
     except Exception:
         logging.exception("TEST ERROR")
-        return jsonify({
-            "error": "Не удалось проверить webhook"
-        }), 500
+        return jsonify({"error": "Не удалось проверить webhook"}), 500
 
 
 # =====================================
@@ -263,49 +378,21 @@ def test():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-
     received_secret = request.headers.get(
         "X-Telegram-Bot-Api-Secret-Token"
     )
 
     if received_secret != WEBHOOK_SECRET:
-        logging.warning("WEBHOOK: неправильный секрет")
         abort(403)
 
     data = request.get_json(silent=True)
 
     if not data:
-        logging.warning("WEBHOOK: пустое обновление")
         return "Empty update", 400
 
     try:
         update = telebot.types.Update.de_json(data)
-
-        # ПОДРОБНАЯ ДИАГНОСТИКА
-        logging.info("UPDATE DATA: %s", data)
-
-        if update.message:
-            logging.info(
-                "MESSAGE RECEIVED: text=%r user_id=%s",
-                update.message.text,
-                update.message.from_user.id
-                if update.message.from_user else None
-            )
-
-        elif update.edited_message:
-            logging.info("UPDATE TYPE: edited_message")
-
-        elif update.callback_query:
-            logging.info("UPDATE TYPE: callback_query")
-
-        else:
-            logging.info("UPDATE TYPE: other")
-
-        # ОБРАБОТКА ОБНОВЛЕНИЯ
         bot.process_new_updates([update])
-
-        logging.info("UPDATE PROCESSING FINISHED")
-
         return "OK", 200
 
     except Exception:
